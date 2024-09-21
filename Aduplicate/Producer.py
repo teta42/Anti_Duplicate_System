@@ -17,9 +17,11 @@ class Producer(KafkaProducer):
         # Возвращаем отсортированный словарь
         return dict(sorted(value.items()))
         
+    # Получение случайной партиции из темы
     def _parts(self, topic: str) -> list:
         return random.choice(list(self.partitions_for(topic)))
         
+    # отправка сообщения
     def send(self, topic: str, value: dict):
         value = self.hesh(value)
         super().send(topic, value, partition=self._parts(topic))
