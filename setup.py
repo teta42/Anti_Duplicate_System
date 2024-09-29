@@ -1,10 +1,11 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='Anti-Duplicate_System_for_Kafka',
+    name='Aduplicate',
     version='0.2',
     packages=find_packages(),
     install_requires=[
-        'kafka-python==2.0.2'
+        'kafka-python-ng>2.0.0',
+        ''
     ],
 )
