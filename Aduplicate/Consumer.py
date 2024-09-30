@@ -15,7 +15,7 @@ class Consumer(KafkaConsumer):
         self._create_special_topic() # Проверяем создание и создаём спец. тему
         
         # Создаём удобный словарь обработанных сообщений
-        dict_of_verified_messages = self._local_db_of_checked_messages_hashes()
+        self._dict_of_verified_messages = self._local_db_of_checked_messages_hashes()
 
     def get_config(self, key):
         '''Метод для получения значения конфигурации по ключу'''
@@ -89,7 +89,13 @@ class Consumer(KafkaConsumer):
 
             return partitioned_data
     
+    def __next__(self):
+        # Получаем следующий элемент из родительского класса
+        original_value = super().__next__()
+        self._post_production(original_value)
+        
+        return original_value
     
-    
-    
+    def _post_production(self, obj: object) -> object:
+        pass
     
