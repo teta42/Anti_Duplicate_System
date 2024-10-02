@@ -1,4 +1,4 @@
-from kafka import KafkaConsumer, TopicPartition
+from kafka import KafkaConsumer, TopicPartition, KafkaProducer
 from kafka.admin import KafkaAdminClient, NewTopic
 import json
 
@@ -14,8 +14,9 @@ class Consumer(KafkaConsumer):
             setattr(self, key, value)
         self._create_special_topic() # Проверяем создание и создаём спец. тему
         
+        self._GMST = _Get_message_for_special_topic(bootstrap_servers=self.get_config("bootstrap_servers"))
         # Создаём удобный словарь обработанных сообщений
-        self._dict_of_verified_messages = self._local_db_of_checked_messages_hashes()
+        self._dict_of_verified_messages = self._GMST._local_db_of_checked_messages_hashes()
 
     def get_config(self, key):
         '''Метод для получения значения конфигурации по ключу'''
@@ -37,65 +38,157 @@ class Consumer(KafkaConsumer):
             # Создаем тему
             admin_client.create_topics(new_topics=[new_topic], validate_only=False)
     
-    def _get_messages_special_topic(self) -> list:
-        '''Здесь мы получаем список всех 
-        проверенных/обработанных сообщений из всех тем и партиций'''
+    def __next__(self):
+        # Получаем следующий элемент из родительского класса
+        original_value = super().__next__()
+        self._dict_of_verified_messages = self._GMST._local_db_of_checked_messages_hashes(self._dict_of_verified_messages)
+        self._post_production(original_value)
         
+        return original_value
+    
+    def _post_production(self, message: object) -> object:
+        # Получаем список проверенных сообщений для конкретного раздела
+        if message.partition in self._dict_of_verified_messages:
+            verified_messages = self._dict_of_verified_messages[message.partition]
+        else:
+            verified_messages = []
+        
+        # Получаем хэш текущего сообщения
+        message_hash = message.value['hash']
+        
+        # Проверяем, что хэш сообщения НЕ находится в списке проверенных сообщений
+        if message_hash not in verified_messages:
+            # Добавляем хэш в локальную базу данных проверенных сообщений
+            if message.partition in self._dict_of_verified_messages:
+                self._dict_of_verified_messages[message.partition].append(message_hash)
+            else:
+                self._dict_of_verified_messages[message.partition] = [message_hash]
+                
+            # Инициализируем продюсера Kafka
+            kafka_producer = KafkaProducer(
+                bootstrap_servers=self.get_config("bootstrap_servers"),  # Адрес вашего Kafka брокера
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),  # Сериализация сообщений в JSON
+                acks=1,
+                retries=10
+            )  
+
+            # Создаем сообщение для отправки в специальную тему
+            message_to_send = {
+                "hash": message_hash,
+                "topic": message.topic,
+                "partition": message.partition
+            }
+            
+            # Отправляем сообщение в 'special_topic'
+            kafka_producer.send('special_topic', message_to_send)
+
+            # Ждем, пока все сообщения будут отправлены
+            kafka_producer.flush()
+
+            # Закрываем продюсера
+            kafka_producer.close()
+            
+            return message
+
+
+    
+    
+class _Get_message_for_special_topic():
+    '''Класс нужен для работы с проверенными 
+    сообщениями из специальной темы'''
+    
+    def __init__(self, bootstrap_servers: str) -> None:
+        self.bootstrap_servers = bootstrap_servers
+        self._list_offset = []
+        
+        self._all_special_messages = self.all_messages()
+        self._max_offset = self.max_offset()
+        
+    def create_consumer(self, bootstrap_servers: str) -> object:
         # Создаем потребителя
         consumer = KafkaConsumer(
-            bootstrap_servers=self.get_config("bootstrap_servers"),
+            bootstrap_servers=bootstrap_servers,
             auto_offset_reset='earliest',
             enable_auto_commit=False,
             value_deserializer=lambda x: json.loads(x.decode('utf-8'))
         )
-
-        # Указываем партицию
-        partition = TopicPartition('special_topic', 0)  # 0 - номер партиции
-        consumer.assign([partition])
-
+        return consumer
+        
+    def all_messages(self) -> list:
+        '''Здесь мы получаем список всех 
+        проверенных/обработанных сообщений из всех тем и партиций
+        а также максиальный offset'''
+        consumer = self.create_consumer(self.bootstrap_servers)
+        
+        tp = TopicPartition("special_topic", 0)
+        consumer.assign([tp])
+        poll = consumer.poll(timeout_ms=1000)
+        
         messages = []
-
-        # Проверяем наличие сообщений
-        poll_result = consumer.poll(timeout_ms=1000)  # Устанавливаем таймаут для ожидания сообщений
-
-        if not poll_result:  # Если нет сообщений
-            return messages  # Возвращаем пустой список
-
-        # Читаем сообщения с установленного offset
-        for _, message_list in poll_result.items():
-            for message in message_list:
-                messages.append(message.value)
-
+        
+        # Получение сообщений
+        try:
+            for tp, messages_list in poll.items():  # Извлекаем сообщения из словаря
+                for message in messages_list:  # Перебираем каждое сообщение
+                    messages.append(message.value)
+                    self._list_offset.append(message.offset)
+        except KeyboardInterrupt:
+            print("Остановка (внутреннего) потребителя.")
+        finally:
+            consumer.close()
+        
         return messages
 
-    def _local_db_of_checked_messages_hashes(self) -> dict:
-        '''Данная функция создаёт удобный словарь с хэшами проверенных сообщений'''
-        
-        # Получение списка проверенных сообщений
-        special_messages = self._get_messages_special_topic()
-        
-        # Проверка на наличие сообщений
-        if special_messages != []:
-            
-            # Создаем словарь для хранения списков по partition
-            partitioned_data = {}
+    def new_messages(self) -> list:
+        consumer = self.create_consumer(self.bootstrap_servers)
 
+        # Подписка на топик и партицию
+        tp = TopicPartition("special_topic", 0)
+        consumer.assign([tp])
+
+        # Установка позиции на указанный offset
+        consumer.seek(tp, self._max_offset)
+
+        poll = consumer.poll(timeout_ms=1000)
+        messages = []
+        try:
+            for tp, messages_list in poll.items():  # Извлекаем сообщения из словаря
+                for message in messages_list:  # Перебираем каждое сообщение
+                    messages.append(message.value)
+                    self._list_offset.append(message.offset)
+        except KeyboardInterrupt:
+            print("Остановка (внутренего) потребителя.")
+        finally:
+            consumer.close()
+        
+        if self._list_offset:
+            self._max_offset = self.max_offset()
+        
+        return messages
+
+    def max_offset(self) -> int:
+        if self._list_offset != []:
+            return max(self._list_offset) + 1
+        else:
+            return 0
+
+    def _local_db_of_checked_messages_hashes(self, partitioned_data={}) -> dict:
+        '''Данная функция создаёт удобный словарь с хэшами проверенных сообщений'''
+
+        if partitioned_data != {}:
+            data = self.new_messages()
+        else:
+            data = self._all_special_messages
+
+        # Проверка на наличие сообщений
+        if data != []:
             # Разделяем данные по partition
-            for item in special_messages:
+            for item in data:
                 partition = item["partition"]
                 if partition not in partitioned_data:
                     partitioned_data[partition] = []
                 partitioned_data[partition].append(item["hash"])
 
-            return partitioned_data
-    
-    def __next__(self):
-        # Получаем следующий элемент из родительского класса
-        original_value = super().__next__()
-        self._post_production(original_value)
-        
-        return original_value
-    
-    def _post_production(self, obj: object) -> object:
-        pass
+        return partitioned_data
+
     
