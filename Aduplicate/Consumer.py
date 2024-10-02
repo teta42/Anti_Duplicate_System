@@ -42,9 +42,8 @@ class Consumer(KafkaConsumer):
         # Получаем следующий элемент из родительского класса
         original_value = super().__next__()
         self._dict_of_verified_messages = self._GMST._local_db_of_checked_messages_hashes(self._dict_of_verified_messages)
-        self._post_production(original_value)
         
-        return original_value
+        return self._post_production(original_value)
     
     def _post_production(self, message: object) -> object:
         # Получаем список проверенных сообщений для конкретного раздела
