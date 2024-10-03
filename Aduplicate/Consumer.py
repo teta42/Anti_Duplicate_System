@@ -39,11 +39,16 @@ class Consumer(KafkaConsumer):
             admin_client.create_topics(new_topics=[new_topic], validate_only=False)
     
     def __next__(self):
-        # Получаем следующий элемент из родительского класса
-        original_value = super().__next__()
+        # Обновляем списки проверенных сообщений
         self._dict_of_verified_messages = self._GMST._local_db_of_checked_messages_hashes(self._dict_of_verified_messages)
-        
-        return self._post_production(original_value)
+        while True:
+            # Получаем следующий элемент из родительского класса
+            original_value = super().__next__()
+            
+            result = self._post_production(original_value)
+            
+            if result is not None:
+                return result
     
     def _post_production(self, message: object) -> object:
         # Получаем список проверенных сообщений для конкретного раздела
@@ -86,6 +91,9 @@ class Consumer(KafkaConsumer):
 
             # Закрываем продюсера
             kafka_producer.close()
+            
+            # Удаляем системную информацию
+            del message.value['hash']
             
             return message
 
