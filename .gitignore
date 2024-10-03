@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# My
+Aduplicate.egg-info/
+build/
+
 # Distribution / packaging
 .Python
 
